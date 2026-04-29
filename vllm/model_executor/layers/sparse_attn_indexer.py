@@ -9,6 +9,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.deepseek_v4_profile import (
+    deepseek_v4_profile_counter,
     deepseek_v4_profile_region,
 )
 from vllm.platforms import current_platform
@@ -246,6 +247,15 @@ def sparse_attn_indexer(
             scales_spec,
         )
         for chunk in prefill_metadata.chunks:
+            deepseek_v4_profile_counter("indexer.prefill.chunks", 1)
+            deepseek_v4_profile_counter(
+                "indexer.prefill.query_tokens",
+                chunk.token_end - chunk.token_start,
+            )
+            deepseek_v4_profile_counter(
+                "indexer.prefill.kv_tokens",
+                chunk.total_seq_lens,
+            )
             k_quant = k_quant_full[: chunk.total_seq_lens]
             k_scale = k_scale_full[: chunk.total_seq_lens]
 
@@ -381,6 +391,15 @@ def sparse_attn_indexer(
             max_model_len, attn_metadata_narrowed.max_seq_len, topk_tokens
         )
         logits_bytes = num_padded_tokens * logits_width * torch.float32.itemsize
+        deepseek_v4_profile_counter("indexer.decode.layers", 1)
+        deepseek_v4_profile_counter("indexer.decode.batch_size", batch_size)
+        deepseek_v4_profile_counter("indexer.decode.next_n", next_n)
+        deepseek_v4_profile_counter("indexer.decode.rows", num_padded_tokens)
+        deepseek_v4_profile_counter("indexer.decode.logits_width", logits_width)
+        deepseek_v4_profile_counter(
+            "indexer.decode.logits_mib",
+            logits_bytes / (1024 * 1024),
+        )
         used_direct_topk = False
         if logits_bytes > sparse_indexer_max_logits_bytes():
             with deepseek_v4_profile_region("indexer.decode.direct_topk"):
@@ -393,6 +412,10 @@ def sparse_attn_indexer(
                     logits_width,
                     topk_indices,
                 )
+        deepseek_v4_profile_counter(
+            "indexer.decode.direct_topk_layers",
+            int(used_direct_topk),
+        )
 
         if not used_direct_topk:
             with deepseek_v4_profile_region("indexer.decode.logits"):
