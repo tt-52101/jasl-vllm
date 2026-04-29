@@ -26,6 +26,8 @@ from vllm.model_executor.layers.deepseek_v4_attention import (
     DeepseekV4MultiHeadLatentAttentionWrapper,
 )
 from vllm.model_executor.layers.deepseek_v4_profile import (
+    deepseek_v4_profile_active,
+    deepseek_v4_profile_counter,
     deepseek_v4_profile_region,
     maybe_profile_deepseek_v4_forward,
 )
@@ -728,6 +730,34 @@ def _use_deepseek_v4_mega_moe(vllm_config: VllmConfig) -> bool:
     return vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
 
 
+def _deepseek_v4_moe_routing_profile_stats(
+    topk_ids: torch.Tensor,
+    *,
+    experts_start_idx: int,
+    experts_end_idx: int,
+    n_local_experts: int,
+) -> dict[str, int]:
+    local_mask = (topk_ids >= experts_start_idx) & (topk_ids < experts_end_idx)
+    local_selections = int(local_mask.sum().item())
+    local_tokens = int(local_mask.any(dim=-1).sum().item())
+    active_local_experts = 0
+    max_local_expert_hits = 0
+    if local_selections > 0:
+        local_ids = topk_ids[local_mask].to(torch.int64) - experts_start_idx
+        local_counts = torch.bincount(local_ids, minlength=n_local_experts)
+        active_local_experts = int((local_counts > 0).sum().item())
+        max_local_expert_hits = int(local_counts.max().item())
+
+    return {
+        "tokens": int(topk_ids.shape[0]),
+        "topk": int(topk_ids.shape[1]),
+        "local_selections": local_selections,
+        "local_tokens": local_tokens,
+        "active_local_experts": active_local_experts,
+        "max_local_expert_hits": max_local_expert_hits,
+    }
+
+
 class DeepseekV4MoE(nn.Module):
     def __init__(
         self,
@@ -898,6 +928,14 @@ class DeepseekV4MoE(nn.Module):
                 hash_indices_table=self.gate.tid2eid,
                 routed_scaling_factor=self.routed_scaling_factor,
             )
+        if deepseek_v4_profile_active():
+            for name, value in _deepseek_v4_moe_routing_profile_stats(
+                topk_ids,
+                experts_start_idx=self.experts_start_idx,
+                experts_end_idx=self.experts_end_idx,
+                n_local_experts=self.n_local_experts,
+            ).items():
+                deepseek_v4_profile_counter(f"ffn.moe.routing.{name}", value)
         activation_clamp = (
             float(self.swiglu_limit) if self.swiglu_limit is not None else None
         )

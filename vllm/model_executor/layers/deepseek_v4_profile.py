@@ -49,6 +49,7 @@ class _DeepSeekV4ProfileSample:
         self.num_tokens = num_tokens
         self.regions: list[_TimedRegion] = []
         self.stats: dict[str, str] = {}
+        self.counters: dict[str, list[float]] = {}
 
     def region(self, name: str):
         return _ProfileRegion(self, name)
@@ -63,6 +64,16 @@ class _DeepSeekV4ProfileSample:
 
     def add_stat(self, name: str, value: Any) -> None:
         self.stats[name] = str(value)
+
+    def add_counter(self, name: str, value: float) -> None:
+        counter = self.counters.setdefault(
+            name,
+            [0.0, 0.0, float("inf"), float("-inf")],
+        )
+        counter[0] += float(value)
+        counter[1] += 1.0
+        counter[2] = min(counter[2], float(value))
+        counter[3] = max(counter[3], float(value))
 
     def log(self) -> None:
         if not self.regions:
@@ -95,6 +106,17 @@ class _DeepSeekV4ProfileSample:
             if self.stats
             else ""
         )
+        if self.counters:
+            counter_parts = []
+            for name, (total, count, min_value, max_value) in sorted(
+                self.counters.items()
+            ):
+                avg_value = total / count if count else 0.0
+                counter_parts.append(
+                    f"{name}=sum={total:.0f},avg={avg_value:.1f},"
+                    f"min={min_value:.0f},max={max_value:.0f},count={count:.0f}"
+                )
+            stats += " counters: " + ", ".join(counter_parts)
         logger.info(
             "DeepSeek V4 profile %s step=%d tokens=%d:%s %s",
             _worker_label(),
@@ -175,6 +197,13 @@ def deepseek_v4_profile_stat(name: str, value: Any) -> None:
     if sample is None:
         return
     sample.add_stat(name, value)
+
+
+def deepseek_v4_profile_counter(name: str, value: float) -> None:
+    sample = getattr(_tls, "sample", None)
+    if sample is None:
+        return
+    sample.add_counter(name, value)
 
 
 def deepseek_v4_profile_lens(name: str, lens: torch.Tensor) -> None:

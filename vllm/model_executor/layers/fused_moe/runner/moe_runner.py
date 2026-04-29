@@ -18,6 +18,8 @@ from vllm.forward_context import (
     is_forward_context_available,
 )
 from vllm.model_executor.layers.deepseek_v4_profile import (
+    deepseek_v4_profile_active,
+    deepseek_v4_profile_counter,
     deepseek_v4_profile_region,
 )
 from vllm.model_executor.layers.fused_moe.config import (
@@ -169,6 +171,58 @@ direct_register_custom_op(
     fake_impl=_moe_forward_shared_fake,
     tags=(torch.Tag.needs_fixed_stride_order,),
 )
+
+
+def _fused_moe_routing_profile_stats(
+    topk_ids: torch.Tensor,
+    *,
+    expert_map: torch.Tensor | None,
+    num_local_experts: int,
+) -> dict[str, int]:
+    local_mask = topk_ids >= 0
+    if expert_map is None:
+        local_ids = topk_ids[local_mask].to(torch.int64)
+    else:
+        safe_topk_ids = topk_ids.to(torch.int64)
+        valid_ids = local_mask & (safe_topk_ids < expert_map.shape[0])
+        mapped_ids = torch.full_like(safe_topk_ids, -1)
+        mapped_ids[valid_ids] = expert_map[safe_topk_ids[valid_ids]].to(
+            mapped_ids.dtype
+        )
+        local_mask = mapped_ids >= 0
+        local_ids = mapped_ids[local_mask].to(torch.int64)
+
+    local_selections = int(local_ids.numel())
+    local_tokens = int(local_mask.any(dim=-1).sum().item())
+    active_local_experts = 0
+    max_local_expert_hits = 0
+    if local_selections > 0:
+        local_counts = torch.bincount(local_ids, minlength=num_local_experts)
+        active_local_experts = int((local_counts > 0).sum().item())
+        max_local_expert_hits = int(local_counts.max().item())
+
+    return {
+        "tokens": int(topk_ids.shape[0]),
+        "topk": int(topk_ids.shape[1]),
+        "local_selections": local_selections,
+        "local_tokens": local_tokens,
+        "active_local_experts": active_local_experts,
+        "max_local_expert_hits": max_local_expert_hits,
+    }
+
+
+def _profile_fused_moe_routing(
+    layer: torch.nn.Module,
+    topk_ids: torch.Tensor,
+) -> None:
+    if not deepseek_v4_profile_active():
+        return
+    for name, value in _fused_moe_routing_profile_stats(
+        topk_ids,
+        expert_map=layer.expert_map,
+        num_local_experts=layer.local_num_experts,
+    ).items():
+        deepseek_v4_profile_counter(f"moe.routing.{name}", value)
 
 
 def _unpack(
@@ -470,6 +524,7 @@ class MoERunner(MoERunnerInterface):
                     router_logits=router_logits,
                     input_ids=input_ids,
                 )
+            _profile_fused_moe_routing(layer, topk_ids)
 
             # Passing shared_experts_input in case SharedExpertsOrder is
             # MK_INTERNAL_OVERLAPPED.

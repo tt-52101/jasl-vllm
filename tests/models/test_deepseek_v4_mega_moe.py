@@ -6,8 +6,12 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
+    _fused_moe_routing_profile_stats,
+)
 from vllm.model_executor.models.deepseek_v4 import (
     DeepseekV4MegaMoEExperts,
+    _deepseek_v4_moe_routing_profile_stats,
     _stage_deepseek_v4_mega_moe_inputs,
     _use_deepseek_v4_mega_moe,
     make_deepseek_v4_expert_params_mapping,
@@ -63,6 +67,66 @@ def test_deepseek_v4_mega_moe_selection_env_override(monkeypatch):
     assert not _use_deepseek_v4_mega_moe(
         _make_mega_moe_config(moe_backend="deep_gemm_mega_moe")
     )
+
+
+def test_deepseek_v4_moe_routing_profile_stats():
+    topk_ids = torch.tensor(
+        [
+            [0, 1, 2, 3],
+            [2, 4, 5, 6],
+            [7, 1, 2, 8],
+        ],
+        dtype=torch.int32,
+        device="cuda",
+    )
+
+    stats = _deepseek_v4_moe_routing_profile_stats(
+        topk_ids,
+        experts_start_idx=2,
+        experts_end_idx=6,
+        n_local_experts=4,
+    )
+
+    assert stats == {
+        "tokens": 3,
+        "topk": 4,
+        "local_selections": 6,
+        "local_tokens": 3,
+        "active_local_experts": 4,
+        "max_local_expert_hits": 3,
+    }
+
+
+def test_fused_moe_routing_profile_stats_with_expert_map():
+    topk_ids = torch.tensor(
+        [
+            [0, 1, 2, 3],
+            [2, 4, 5, 6],
+            [7, 1, 2, 8],
+        ],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    expert_map = torch.tensor(
+        [-1, -1, 0, 1, 2, 3, -1, -1, -1],
+        dtype=torch.int32,
+        device="cuda",
+    )
+
+    stats = _fused_moe_routing_profile_stats(
+        topk_ids,
+        expert_map=expert_map,
+        num_local_experts=4,
+    )
+
+    assert stats == {
+        "tokens": 3,
+        "topk": 4,
+        "local_selections": 6,
+        "local_tokens": 3,
+        "active_local_experts": 4,
+        "max_local_expert_hits": 3,
+    }
 
 
 def test_deepseek_v4_mega_moe_expert_mapping():
