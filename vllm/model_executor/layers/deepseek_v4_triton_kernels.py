@@ -13,6 +13,51 @@ FP8_DS_MLA_SCALE_BYTES = 8
 FP8_DS_MLA_TOKEN_BYTES = 576
 
 
+def _view_packed_fp8_paged_mqa_kv_cache(
+    kv_cache: torch.Tensor,
+    head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return FP8 values and fp32 scales from indexer cache block storage."""
+    if kv_cache.dtype != torch.uint8:
+        raise TypeError(f"Expected uint8 kv_cache, got {kv_cache.dtype}")
+    if kv_cache.dim() == 3:
+        num_blocks, block_size, head_dim_with_scale = kv_cache.shape
+        num_kv_heads = 1
+    elif kv_cache.dim() == 4:
+        num_blocks, block_size, num_kv_heads, head_dim_with_scale = kv_cache.shape
+    else:
+        raise ValueError(
+            f"Expected 3D or 4D kv_cache, got {kv_cache.dim()} dimensions"
+        )
+    if num_kv_heads != 1:
+        raise ValueError(f"Expected one KV head, got {num_kv_heads}")
+
+    scale_bytes = head_dim_with_scale - head_dim
+    if scale_bytes <= 0 or scale_bytes % torch.float32.itemsize != 0:
+        raise ValueError(
+            "Expected kv_cache last dimension to contain FP8 values followed "
+            f"by fp32 scale bytes; got head_dim={head_dim}, "
+            f"last_dim={head_dim_with_scale}"
+        )
+
+    block_stride = kv_cache.stride(0)
+    base_storage_offset = kv_cache.storage_offset()
+    scale_elems = scale_bytes // torch.float32.itemsize
+    kv_values = torch.as_strided(
+        kv_cache,
+        size=(num_blocks, block_size, 1, head_dim),
+        stride=(block_stride, head_dim, head_dim, 1),
+        storage_offset=base_storage_offset,
+    ).view(torch.float8_e4m3fn)
+    kv_scale = torch.as_strided(
+        kv_cache,
+        size=(num_blocks, block_size, 1, scale_bytes),
+        stride=(block_stride, scale_bytes, scale_bytes, 1),
+        storage_offset=base_storage_offset + block_size * head_dim,
+    ).view(torch.float32)
+    return kv_values, kv_scale[..., :scale_elems]
+
+
 @triton.jit
 def _sparse_attention_bf16_kernel(
     q_ptr,
@@ -872,8 +917,7 @@ def fp8_paged_mqa_logits_triton(
             token_count=token_count,
         )
 
-    kv_values = kv_cache[..., :head_dim].view(torch.float8_e4m3fn)
-    kv_scale = kv_cache[..., head_dim:].view(torch.float32)
+    kv_values, kv_scale = _view_packed_fp8_paged_mqa_kv_cache(kv_cache, head_dim)
     _, block_size, _, _ = kv_values.size()
     num_rows = batch_size * next_n
     if token_count is None:
@@ -1054,8 +1098,7 @@ def fp8_paged_mqa_logits_rowwise_triton(
     token_count: int | None = None,
 ) -> torch.Tensor:
     batch_size, next_n, num_heads, head_dim = q.size()
-    kv_values = kv_cache[..., :head_dim].view(torch.float8_e4m3fn)
-    kv_scale = kv_cache[..., head_dim:].view(torch.float32)
+    kv_values, kv_scale = _view_packed_fp8_paged_mqa_kv_cache(kv_cache, head_dim)
     _, block_size, _, _ = kv_values.size()
     num_rows = batch_size * next_n
     if token_count is None:

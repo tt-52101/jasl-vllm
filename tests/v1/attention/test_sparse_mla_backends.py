@@ -75,6 +75,35 @@ SPARSE_BACKEND_BATCH_SPECS["large_q_pure_prefill"] = BatchSpec(
 DEVICE_TYPE = current_platform.device_type
 
 
+def _make_packed_fp8_indexer_cache(
+    kv_fp8: torch.Tensor,
+    kv_scale: torch.Tensor,
+) -> torch.Tensor:
+    num_blocks, block_size, num_kv_heads, head_dim = kv_fp8.shape
+    assert num_kv_heads == 1
+    kv_scale_bytes = kv_scale.contiguous().view(torch.uint8).reshape(
+        num_blocks, block_size, num_kv_heads, -1
+    )
+    scale_bytes = kv_scale_bytes.shape[-1]
+    fused_kv = torch.empty(
+        num_blocks,
+        block_size,
+        head_dim + scale_bytes,
+        device=kv_fp8.device,
+        dtype=torch.uint8,
+    )
+    fused_kv_blocks = fused_kv.view(num_blocks, -1)
+    value_end = block_size * head_dim
+    scale_end = value_end + block_size * scale_bytes
+    fused_kv_blocks[:, :value_end] = kv_fp8.view(torch.uint8).reshape(
+        num_blocks, -1
+    )
+    fused_kv_blocks[:, value_end:scale_end] = kv_scale_bytes.reshape(
+        num_blocks, -1
+    )
+    return fused_kv
+
+
 def test_sm120_fp8_mqa_logits_chunk_sizes_cap_large_scores():
     assert deep_gemm_utils._fp8_mqa_logits_head_chunk_size(128, 128, 32) == 8
     assert deep_gemm_utils._fp8_mqa_logits_head_chunk_size(8192, 8192, 32) == 1
@@ -149,16 +178,7 @@ def test_sm120_fp8_paged_mqa_logits_fallback_matches_reference(
     )
     kv_scale = kv.abs().float().amax(dim=-1, keepdim=True).clamp(1e-4) / 448.0
     kv_fp8 = (kv * kv_scale.reciprocal()).to(torch.float8_e4m3fn)
-    fused_kv = torch.empty(
-        num_blocks,
-        block_size,
-        1,
-        head_dim + 4,
-        device="cuda",
-        dtype=torch.uint8,
-    )
-    fused_kv[..., :head_dim] = kv_fp8.view(torch.uint8)
-    fused_kv[..., head_dim:] = kv_scale.contiguous().view(torch.uint8)
+    fused_kv = _make_packed_fp8_indexer_cache(kv_fp8, kv_scale)
 
     weights = torch.randn(
         batch_size * next_n, num_heads, device="cuda", dtype=torch.float32
@@ -238,16 +258,7 @@ def test_sm120_fp8_paged_mqa_rowwise_logits_matches_reference():
     )
     kv_scale = kv.abs().float().amax(dim=-1, keepdim=True).clamp(1e-4) / 448.0
     kv_fp8 = (kv * kv_scale.reciprocal()).to(torch.float8_e4m3fn)
-    fused_kv = torch.empty(
-        num_blocks,
-        block_size,
-        1,
-        head_dim + 4,
-        device="cuda",
-        dtype=torch.uint8,
-    )
-    fused_kv[..., :head_dim] = kv_fp8.view(torch.uint8)
-    fused_kv[..., head_dim:] = kv_scale.contiguous().view(torch.uint8)
+    fused_kv = _make_packed_fp8_indexer_cache(kv_fp8, kv_scale)
 
     weights = torch.randn(
         batch_size * next_n, num_heads, device="cuda", dtype=torch.float32
@@ -315,16 +326,7 @@ def test_sm120_fp8_paged_mqa_topk_indices_streams_chunks(
     )
     kv_scale = kv.abs().float().amax(dim=-1, keepdim=True).clamp(1e-4) / 448.0
     kv_fp8 = (kv * kv_scale.reciprocal()).to(torch.float8_e4m3fn)
-    fused_kv = torch.empty(
-        num_blocks,
-        block_size,
-        1,
-        head_dim + 4,
-        device="cuda",
-        dtype=torch.uint8,
-    )
-    fused_kv[..., :head_dim] = kv_fp8.view(torch.uint8)
-    fused_kv[..., head_dim:] = kv_scale.contiguous().view(torch.uint8)
+    fused_kv = _make_packed_fp8_indexer_cache(kv_fp8, kv_scale)
 
     weights = torch.randn(
         batch_size * next_n, num_heads, device="cuda", dtype=torch.float32

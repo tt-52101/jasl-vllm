@@ -669,13 +669,17 @@ def _fp8_paged_mqa_logits_torch(
         raise NotImplementedError("SM120 paged MQA torch path only supports FP8 Q")
 
     batch_size, next_n, num_heads, head_dim = q_values.shape
-    _, block_kv, _, head_dim_with_scale = kv_cache.shape
-    assert head_dim_with_scale == head_dim + 4
+    head_dim_with_scale = kv_cache.shape[-1]
+    assert head_dim_with_scale > head_dim
     assert weights.shape == (batch_size * next_n, num_heads)
     assert context_lens.shape == (batch_size, next_n)
 
-    kv_values = kv_cache[..., :head_dim].view(torch.float8_e4m3fn)
-    kv_scales = kv_cache[..., head_dim : head_dim + 4].view(torch.float32)
+    from vllm.model_executor.layers.deepseek_v4_triton_kernels import (
+        _view_packed_fp8_paged_mqa_kv_cache,
+    )
+
+    kv_values, kv_scales = _view_packed_fp8_paged_mqa_kv_cache(kv_cache, head_dim)
+    _, block_kv, _, _ = kv_values.shape
     logits = torch.full(
         (batch_size * next_n, max_model_len),
         float("-inf"),
@@ -883,9 +887,10 @@ def fp8_fp4_paged_mqa_logits(
             [B, next_n, H, D] float8_e4m3fn and q_scale is None. FP4 path:
             q_values is packed uint8 and q_scale is the companion
             block-scale tensor.
-        kv_cache: Paged KV-cache. FP8 layout is [num_blocks, block_size, 1,
-            D+4], dtype `torch.uint8`, with the last 4 bytes per (block, pos)
-            storing the float dequant scale.
+        kv_cache: Paged KV-cache. FP8 layout is [num_blocks, block_size, D+4]
+            or [num_blocks, block_size, 1, D+4], dtype `torch.uint8`. Within
+            each block, the D-byte FP8 values for every token are stored first,
+            followed by per-token fp32 scale bytes.
         weights: Tensor of shape [B * next_n, H], dtype `torch.float32`.
         context_lens: Tensor of shape [B], dtype int32; effective context length
             for each batch element.
