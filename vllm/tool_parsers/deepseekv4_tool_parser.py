@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+from typing import Any
 
 import regex as re
 
@@ -71,20 +72,18 @@ class DeepSeekV4ToolParser(DeepSeekV32ToolParser):
             return getattr(function, "parameters", None)
         return getattr(getattr(tool, "function", None), "parameters", None)
 
-    def _extract_param_name(self, param_name: str) -> str:
-        if param_name == ESCAPED_ARGUMENTS_PARAM_NAME:
-            return "arguments"
-        return param_name
-
     def _get_param_config(
         self,
-        request: ChatCompletionRequest | None,
         function_name: str | None,
+        request: ChatCompletionRequest | None = None,
     ) -> dict[str, dict]:
-        if not request or not request.tools or not function_name:
+        if not function_name:
             return {}
 
-        for tool in request.tools:
+        tools = list(self.tools)
+        if request and request.tools:
+            tools.extend(request.tools)
+        for tool in tools:
             if self._function_name(tool) != function_name:
                 continue
             params = self._function_parameters(tool)
@@ -96,13 +95,19 @@ class DeepSeekV4ToolParser(DeepSeekV32ToolParser):
 
         return {}
 
+    @staticmethod
+    def _extract_param_name(param_name: str) -> str:
+        if param_name == ESCAPED_ARGUMENTS_PARAM_NAME:
+            return "arguments"
+        return param_name
+
     def _coerce_param_value(
         self,
         value: str,
         *,
         string_attr: str,
         param_type,
-    ):
+    ) -> Any:
         if string_attr == "true":
             return value
         if param_type:
@@ -114,9 +119,9 @@ class DeepSeekV4ToolParser(DeepSeekV32ToolParser):
 
     @staticmethod
     def _repair_param_dict(
-        param_dict: dict,
+        param_dict: dict[str, Any],
         param_config: dict[str, dict],
-    ) -> dict:
+    ) -> dict[str, Any]:
         allowed = set(param_config.keys())
         for wrapper in ("arguments", "input"):
             if set(param_dict.keys()) != {wrapper} or wrapper in allowed:
@@ -136,9 +141,9 @@ class DeepSeekV4ToolParser(DeepSeekV32ToolParser):
         invoke_str: str,
         request: ChatCompletionRequest | None = None,
         function_name: str | None = None,
-    ) -> dict:
-        param_config = self._get_param_config(request, function_name)
-        param_dict = {}
+    ) -> dict[str, Any]:
+        param_config = self._get_param_config(function_name, request=request)
+        param_dict: dict[str, Any] = {}
 
         for param_name, string_attr, param_val in self.parameter_complete_regex.findall(
             invoke_str
