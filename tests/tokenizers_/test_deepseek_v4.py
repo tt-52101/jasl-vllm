@@ -256,6 +256,59 @@ def test_deepseek_v4_uses_v4_tool_prompt_from_request_tools():
     assert prompt.endswith("<｜User｜>Weather?<｜Assistant｜></think>")
 
 
+def test_deepseek_v4_drops_prior_reasoning_on_new_user_turn_with_tools():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get weather for a city",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+            },
+        }
+    ]
+    messages = [
+        {"role": "user", "content": "Question one"},
+        {
+            "role": "assistant",
+            "reasoning": "private prior reasoning",
+            "content": "Answer one",
+        },
+        {"role": "user", "content": "Question two"},
+    ]
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "deepseek-ai/DeepSeek-V4-Flash",
+            "messages": messages,
+            "tools": tools,
+        }
+    )
+    chat_kwargs = request.apply_chat_template_kwargs(
+        request.build_chat_params(None, "auto").chat_template_kwargs
+    )
+    conversation, _, _ = parse_chat_messages(
+        messages,
+        _model_config(),
+        content_format="string",
+    )
+
+    prompt = _tokenizer().apply_chat_template(
+        conversation,
+        tools=tools,
+        tokenize=False,
+        **chat_kwargs,
+    )
+
+    assert '"name": "get_weather"' in prompt
+    assert "private prior reasoning" not in prompt
+    assert "Answer one<｜end▁of▁sentence｜>" in prompt
+    assert prompt.endswith("<｜User｜>Question two<｜Assistant｜><think>")
+
+
 def test_deepseek_v4_renders_parsed_history_tool_arguments():
     messages = [
         {"role": "user", "content": "List the repo"},
@@ -371,6 +424,59 @@ def test_deepseek_v4_renders_openai_history_tool_call_with_null_arguments():
 
     assert '<｜DSML｜invoke name="refresh">' in prompt
     assert "<｜DSML｜parameter" not in prompt
+
+
+def test_deepseek_v4_escapes_arguments_tool_schema_name():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "echo_args",
+                "description": "Echo arguments",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "arguments": {"type": "string"},
+                    },
+                    "required": ["arguments"],
+                },
+            },
+        }
+    ]
+
+    prompt = _tokenizer().apply_chat_template(
+        [{"role": "user", "content": "Echo this"}],
+        tools=tools,
+        tokenize=False,
+    )
+
+    assert "__vllm_param_arguments__" in prompt
+    assert '"required": ["__vllm_param_arguments__"]' in prompt
+    assert '"arguments": {"type": "string"}' not in prompt
+
+
+def test_deepseek_v4_escapes_arguments_history_tool_call_name():
+    prompt = _tokenizer().apply_chat_template(
+        [
+            {"role": "user", "content": "Echo this"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "echo_args",
+                            "arguments": '{"arguments": "hello"}',
+                        },
+                    }
+                ],
+            },
+        ],
+        tokenize=False,
+    )
+
+    assert 'parameter name="__vllm_param_arguments__" string="true">hello' in prompt
+    assert 'parameter name="arguments"' not in prompt
 
 
 @pytest.mark.parametrize("reasoning_effort", ["minimal", "low", "medium", "high"])

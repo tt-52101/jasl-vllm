@@ -62,6 +62,7 @@ tool_calls_template = (
     "<{dsml_token}{tc_block_name}>\n{tool_calls}\n</{dsml_token}{tc_block_name}>"
 )
 tool_calls_block_name: str = "tool_calls"
+ESCAPED_ARGUMENTS_PARAM_NAME = "__vllm_param_arguments__"
 
 tool_output_template: str = (
     "<tool_result>{content}</tool_result>"
@@ -117,6 +118,40 @@ def tools_from_openai_format(tools):
     return [tool["function"] for tool in tools]
 
 
+def _escape_param_name(name: str) -> str:
+    if name == "arguments":
+        return ESCAPED_ARGUMENTS_PARAM_NAME
+    return name
+
+
+def _unescape_param_name(name: str) -> str:
+    if name == ESCAPED_ARGUMENTS_PARAM_NAME:
+        return "arguments"
+    return name
+
+
+def _escape_tool_schema(tool: Dict[str, Any]) -> Dict[str, Any]:
+    escaped_tool = copy.deepcopy(tool)
+    parameters = escaped_tool.get("parameters")
+    if not isinstance(parameters, dict):
+        return escaped_tool
+
+    properties = parameters.get("properties")
+    if isinstance(properties, dict):
+        parameters["properties"] = {
+            _escape_param_name(key): value for key, value in properties.items()
+        }
+
+    required = parameters.get("required")
+    if isinstance(required, list):
+        parameters["required"] = [
+            _escape_param_name(name) if isinstance(name, str) else name
+            for name in required
+        ]
+
+    return escaped_tool
+
+
 def tool_calls_from_openai_format(tool_calls):
     """Convert OpenAI-format tool calls to internal format."""
     return [
@@ -156,25 +191,58 @@ def encode_arguments_to_dsml(tool_call: Dict[str, Any]) -> str:
     P_dsml_strs = []
 
     raw_arguments = tool_call.get("arguments")
+    arguments: dict[str, Any]
     if raw_arguments is None or raw_arguments == "":
         arguments = {}
-    elif isinstance(raw_arguments, str):
-        arguments = json.loads(raw_arguments)
-        if arguments is None:
-            arguments = {}
     else:
-        arguments = raw_arguments
+        normalized_arguments = _normalize_tool_call_arguments(raw_arguments)
+        if not isinstance(normalized_arguments, dict):
+            return ""
+        arguments = normalized_arguments
 
     for k, v in arguments.items():
         p_dsml_str = p_dsml_template.format(
             dsml_token=dsml_token,
-            key=k,
+            key=_escape_param_name(k),
             is_str="true" if isinstance(v, str) else "false",
             value=v if isinstance(v, str) else to_json(v),
         )
         P_dsml_strs.append(p_dsml_str)
 
     return "\n".join(P_dsml_strs)
+
+
+def _normalize_tool_call_arguments(arguments: Any) -> Dict[str, Any] | None:
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except json.JSONDecodeError:
+            return None
+
+    if not isinstance(arguments, dict):
+        return None
+
+    if set(arguments.keys()) == {"input"}:
+        inner = arguments["input"]
+        if isinstance(inner, str):
+            try:
+                inner = json.loads(inner)
+            except json.JSONDecodeError:
+                return arguments
+        if isinstance(inner, dict):
+            arguments = inner
+
+    if set(arguments.keys()) == {"arguments"}:
+        inner = arguments["arguments"]
+        if isinstance(inner, str):
+            try:
+                inner = json.loads(inner)
+            except json.JSONDecodeError:
+                return arguments
+            if isinstance(inner, dict):
+                return inner
+
+    return arguments
 
 
 def decode_dsml_to_arguments(tool_name: str, tool_args: Dict[str, Tuple[str, str]]) -> Dict[str, str]:
@@ -193,7 +261,7 @@ def decode_dsml_to_arguments(tool_name: str, tool_args: Dict[str, Tuple[str, str
             value = to_json(value)
         return f"{to_json(key)}: {value}"
 
-    tool_args_json = "{" + ", ".join([_decode_value(k, v, string=is_str) for k, (v, is_str) in tool_args.items()]) + "}"
+    tool_args_json = "{" + ", ".join([_decode_value(_unescape_param_name(k), v, string=is_str) for k, (v, is_str) in tool_args.items()]) + "}"
     return dict(name=tool_name, arguments=tool_args_json)
 
 
@@ -207,7 +275,7 @@ def render_tools(tools: List[Dict[str, Union[str, Dict[str, Any]]]]) -> str:
     Returns:
         Formatted tools section string.
     """
-    tools_json = [to_json(t) for t in tools]
+    tools_json = [to_json(_escape_tool_schema(t)) for t in tools]
 
     return TOOLS_TEMPLATE.format(
         tool_schemas="\n".join(tools_json),
@@ -262,6 +330,7 @@ def render_message(index: int, messages: List[Dict[str, Any]], thinking_mode: st
     tool_calls = msg.get("tool_calls")
     reasoning = msg.get("reasoning")
     wo_eos = msg.get("wo_eos", False)
+    preserve_reasoning = msg.get("__vllm_preserve_reasoning", False)
 
     if tools:
         tools = tools_from_openai_format(tools)
@@ -353,7 +422,7 @@ def render_message(index: int, messages: List[Dict[str, Any]], thinking_mode: st
         prev_has_task = index - 1 >= 0 and messages[index - 1].get("task") is not None
 
         if thinking_mode == "thinking" and not prev_has_task:
-            if not drop_thinking or index > last_user_idx:
+            if not drop_thinking or index > last_user_idx or preserve_reasoning:
                 thinking_part = thinking_template.format(reasoning=reasoning) + thinking_end_token
             else:
                 thinking_part = ""
@@ -395,9 +464,17 @@ def render_message(index: int, messages: List[Dict[str, Any]], thinking_mode: st
     elif messages[index].get("role") in ["user", "developer"]:
         # Normal generation: append Assistant + thinking token
         prompt += ASSISTANT_SP_TOKEN
+        next_preserves_reasoning = (
+            index + 1 < len(messages)
+            and messages[index + 1].get("__vllm_preserve_reasoning", False)
+        )
         if not drop_thinking and thinking_mode == "thinking":
             prompt += thinking_start_token
-        elif drop_thinking and thinking_mode == "thinking" and index >= last_user_idx:
+        elif (
+            drop_thinking
+            and thinking_mode == "thinking"
+            and (index >= last_user_idx or next_preserves_reasoning)
+        ):
             prompt += thinking_start_token
         else:
             prompt += thinking_end_token
@@ -556,10 +633,7 @@ def encode_messages(
 
     prompt = bos_token if add_default_bos_token and len(context) == 0 else ""
 
-    # Resolve drop_thinking: if any message has tools defined, don't drop thinking
     effective_drop_thinking = drop_thinking
-    if any(m.get("tools") for m in full_messages):
-        effective_drop_thinking = False
 
     if thinking_mode == "thinking" and effective_drop_thinking:
         full_messages = _drop_thinking_messages(full_messages)
@@ -583,6 +657,60 @@ def encode_messages(
     return prompt
 
 
+def _has_tool_result_blocks(msg: Dict[str, Any]) -> bool:
+    return any(
+        block.get("type") == "tool_result"
+        for block in msg.get("content_blocks", [])
+    )
+
+
+def _tool_result_ids(msg: Dict[str, Any]) -> set[str]:
+    return {
+        block["tool_use_id"]
+        for block in msg.get("content_blocks", [])
+        if block.get("type") == "tool_result" and block.get("tool_use_id")
+    }
+
+
+def _tool_call_ids(msg: Dict[str, Any]) -> set[str]:
+    ids: set[str] = set()
+    for tool_call in msg.get("tool_calls", []):
+        if not isinstance(tool_call, dict):
+            continue
+        tool_call_id = tool_call.get("id")
+        function = tool_call.get("function")
+        if not tool_call_id and isinstance(function, dict):
+            tool_call_id = function.get("id")
+        if tool_call_id:
+            ids.add(tool_call_id)
+    return ids
+
+
+def _active_tool_call_reasoning_indices(
+    messages: List[Dict[str, Any]],
+    last_user_idx: int,
+) -> set[int]:
+    """Return assistant tool-call messages needed for the active tool result."""
+    if last_user_idx < 1 or not _has_tool_result_blocks(messages[last_user_idx]):
+        return set()
+
+    result_ids = _tool_result_ids(messages[last_user_idx])
+    for idx in range(last_user_idx - 1, -1, -1):
+        msg = messages[idx]
+        role = msg.get("role")
+
+        if role == "assistant" and msg.get("tool_calls"):
+            call_ids = _tool_call_ids(msg)
+            if not result_ids or not call_ids or result_ids & call_ids:
+                return {idx}
+            return set()
+
+        if role == "user" and not _has_tool_result_blocks(msg):
+            break
+
+    return set()
+
+
 def _drop_thinking_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Drop reasoning and non-essential messages before the last user message.
@@ -590,16 +718,34 @@ def _drop_thinking_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, An
     Behavior:
     - Messages with role in ["user", "system", "tool", "latest_reminder"] are always kept.
     - Messages at or after the last user index are always kept.
+    - Assistant tool-call reasoning is kept while rendering active tool results.
     - Assistant messages before the last user get reasoning removed.
     - Developer messages before the last user are dropped entirely.
     """
     last_user_idx = find_last_user_index(messages)
+    active_tool_call_indices = _active_tool_call_reasoning_indices(
+        messages,
+        last_user_idx,
+    )
+    active_tool_context_indices = {
+        idx - 1
+        for idx in active_tool_call_indices
+        if idx > 0 and messages[idx - 1].get("role") == "developer"
+    }
     result = []
     keep_roles = {"user", "system", "tool", "latest_reminder", "direct_search_results"}
 
     for idx, msg in enumerate(messages):
         role = msg.get("role")
-        if role in keep_roles or idx >= last_user_idx:
+        if (
+            role in keep_roles
+            or idx >= last_user_idx
+            or idx in active_tool_context_indices
+        ):
+            result.append(msg)
+        elif idx in active_tool_call_indices:
+            msg = copy.copy(msg)
+            msg["__vllm_preserve_reasoning"] = True
             result.append(msg)
         elif role == "assistant":
             msg = copy.copy(msg)
