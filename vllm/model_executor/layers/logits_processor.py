@@ -50,6 +50,7 @@ class LogitsProcessor(PluggableLayer):
         self.soft_cap = soft_cap
         # Whether to use gather or all-gather to gather the logits.
         self.use_all_gather = current_platform.use_all_gather()
+        self.sync_after_gather = False
 
     def forward(
         self,
@@ -84,6 +85,8 @@ class LogitsProcessor(PluggableLayer):
         else:
             # None may be returned for rank > 0
             logits = tensor_model_parallel_gather(logits)
+        if self.sync_after_gather and logits is not None and logits.is_cuda:
+            torch.cuda.current_stream(logits.device).synchronize()
         return logits
 
     def _get_logits(

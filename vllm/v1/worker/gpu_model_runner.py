@@ -223,6 +223,70 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+
+def _should_disable_mtp_full_cudagraph_for_padded_batch(
+    speculative_config: Any,
+    cudagraph_mode: CUDAGraphMode,
+    num_tokens: int,
+    num_reqs: int,
+    batch_descriptor: BatchDescriptor,
+) -> bool:
+    """Return true for MTP decode batches that need graph padding."""
+    if cudagraph_mode != CUDAGraphMode.FULL:
+        return False
+    if getattr(speculative_config, "method", None) != "mtp":
+        return False
+    if batch_descriptor.num_tokens != num_tokens:
+        return False
+    num_speculative_tokens = getattr(speculative_config, "num_speculative_tokens", 0)
+    decode_group = num_speculative_tokens + 1
+    if decode_group <= 1 or num_reqs <= 0:
+        return False
+    if num_tokens != num_reqs * decode_group:
+        return False
+    return batch_descriptor.num_reqs > num_reqs
+
+
+def _should_sync_mtp_logits_gather(speculative_config: Any) -> bool:
+    return (
+        getattr(speculative_config, "method", None) == "mtp"
+        and current_platform.is_cuda()
+        and current_platform.is_device_capability_family(120)
+    )
+
+
+def _enable_sync_logits_gather_for_module(module: nn.Module) -> int:
+    from vllm.model_executor.layers.logits_processor import (
+        LogitsProcessor as ModelLogitsProcessor,
+    )
+
+    num_enabled = 0
+    for submodule in module.modules():
+        if isinstance(submodule, ModelLogitsProcessor):
+            submodule.sync_after_gather = True
+            num_enabled += 1
+    return num_enabled
+
+
+def _enable_sync_mtp_logits_gather(
+    target_model: nn.Module,
+    drafter_model: nn.Module | None,
+    speculative_config: Any,
+) -> None:
+    if not _should_sync_mtp_logits_gather(speculative_config):
+        return
+
+    num_enabled = _enable_sync_logits_gather_for_module(target_model)
+    if drafter_model is not None:
+        num_enabled += _enable_sync_logits_gather_for_module(drafter_model)
+    if num_enabled:
+        logger.info_once(
+            "Enabled synchronized logits gather for SM12x MTP on %d "
+            "LogitsProcessor module(s).",
+            num_enabled,
+        )
+
+
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
@@ -801,6 +865,7 @@ class GPUModelRunner(
 
         # Cached outputs.
         self._draft_token_ids: list[list[int]] | torch.Tensor | None = None
+        self._draft_probs: torch.Tensor | None = None
         # N-gram GPU path: async D2H buffer/event for per-request valid draft counts.
         self._num_valid_draft_tokens: torch.Tensor | None = None
         self._num_valid_draft_tokens_cpu: torch.Tensor | None = None
@@ -3417,13 +3482,96 @@ class GPUModelRunner(
             draft_token_ids_cpu, _ = self._get_draft_token_ids_cpu()
             self.input_batch.update_async_spec_token_ids(draft_token_ids_cpu)
 
+        draft_probs = self._get_draft_probs_for_rejection(spec_decode_metadata)
         sampler_output = self.rejection_sampler(
             spec_decode_metadata,
-            None,  # draft_probs
+            draft_probs,
             logits,
             sampling_metadata,
         )
         return sampler_output
+
+    def _get_draft_probs_for_rejection(
+        self, spec_decode_metadata: SpecDecodeMetadata
+    ) -> torch.Tensor | None:
+        draft_probs = self._draft_probs
+        if draft_probs is None:
+            return None
+
+        num_draft_tokens = spec_decode_metadata.num_draft_tokens
+        total_num_draft_tokens = int(spec_decode_metadata.draft_token_ids.numel())
+        if total_num_draft_tokens == 0:
+            return None
+
+        prev_positions = self.prev_positions.np[: len(num_draft_tokens)]
+        sync_without_prev_positions = (
+            not self.use_async_scheduling and np.all(prev_positions < 0)
+        )
+        if sync_without_prev_positions:
+            if draft_probs.ndim == 2:
+                return draft_probs[:total_num_draft_tokens].contiguous()
+            if draft_probs.shape[0] >= len(num_draft_tokens):
+                prev_positions = np.arange(len(num_draft_tokens))
+            else:
+                packed_probs = []
+                draft_row = 0
+                for num_tokens in num_draft_tokens:
+                    if num_tokens == 0:
+                        continue
+                    if draft_row >= draft_probs.shape[0]:
+                        raise RuntimeError(
+                            "Spec decode metadata references more draft token "
+                            "rows than were recorded by the draft model."
+                        )
+                    packed_probs.append(draft_probs[draft_row, :num_tokens])
+                    draft_row += 1
+                if not packed_probs:
+                    return None
+                return torch.cat(packed_probs, dim=0).contiguous()
+        stable_positions = np.array_equal(
+            prev_positions, np.arange(len(num_draft_tokens))
+        )
+
+        if draft_probs.ndim == 2:
+            if not stable_positions:
+                max_spec_len = self.num_spec_tokens
+                packed_probs = []
+                for prev_pos, num_tokens in zip(prev_positions, num_draft_tokens):
+                    if num_tokens == 0:
+                        continue
+                    if prev_pos < 0:
+                        raise RuntimeError(
+                            "Spec decode metadata references draft tokens for a "
+                            "request without a previous batch position."
+                        )
+                    start = prev_pos * max_spec_len
+                    packed_probs.append(draft_probs[start : start + num_tokens])
+                if not packed_probs:
+                    return None
+                return torch.cat(packed_probs, dim=0).contiguous()
+            return draft_probs[:total_num_draft_tokens].contiguous()
+
+        max_spec_len = draft_probs.shape[1]
+        if stable_positions and all(n == max_spec_len for n in num_draft_tokens):
+            return (
+                draft_probs[: len(num_draft_tokens)]
+                .reshape(-1, draft_probs.shape[-1])[:total_num_draft_tokens]
+                .contiguous()
+            )
+
+        packed_probs = []
+        for prev_pos, num_tokens in zip(prev_positions, num_draft_tokens):
+            if num_tokens == 0:
+                continue
+            if prev_pos < 0:
+                raise RuntimeError(
+                    "Spec decode metadata references draft tokens for a "
+                    "request without a previous batch position."
+                )
+            packed_probs.append(draft_probs[prev_pos, :num_tokens])
+        if not packed_probs:
+            return None
+        return torch.cat(packed_probs, dim=0).contiguous()
 
     def _bookkeeping_sync(
         self,
@@ -3677,6 +3825,15 @@ class GPUModelRunner(
         cudagraph_mode, batch_descriptor = dispatch_cudagraph(
             num_tokens_padded, disable_full=use_cascade_attn or has_encoder_output
         )
+        if _should_disable_mtp_full_cudagraph_for_padded_batch(
+            self.speculative_config,
+            cudagraph_mode,
+            num_tokens_padded,
+            num_reqs,
+            batch_descriptor,
+        ):
+            cudagraph_mode = CUDAGraphMode.NONE
+            batch_descriptor = BatchDescriptor(num_tokens_padded)
         num_tokens_padded = batch_descriptor.num_tokens
         if self.compilation_config.pass_config.enable_sp:
             assert (
@@ -4264,6 +4421,7 @@ class GPUModelRunner(
                 )
 
         self._draft_token_ids = None
+        self._draft_probs = None
         self._draft_token_req_ids = None
         self.valid_sampled_token_count_gpu = None
         self.input_batch.prev_sampled_token_ids = None
@@ -4282,6 +4440,7 @@ class GPUModelRunner(
                     spec_decode_common_attn_metadata,
                     slot_mappings,
                 )
+                self._draft_probs = getattr(self.drafter, "draft_probs", None)
                 self._copy_draft_token_ids_to_cpu(scheduler_output)
 
         spec_config = self.speculative_config
@@ -4358,6 +4517,7 @@ class GPUModelRunner(
                 self._draft_token_ids = torch.zeros(
                     1, device=self.device, dtype=torch.int32
                 ).expand(len(self.input_batch.req_ids), self.num_spec_tokens)
+                self._draft_probs = None
                 self._copy_draft_token_ids_to_cpu(scheduler_output, zeros_only=True)
 
         with record_function_or_nullcontext("gpu_model_runner: bookkeep"):
@@ -4905,6 +5065,12 @@ class GPUModelRunner(
                             spec_config.draft_model_config,
                         )
                         eplb_models += 1
+
+                _enable_sync_mtp_logits_gather(
+                    self.model,
+                    getattr(getattr(self, "drafter", None), "model", None),
+                    self.speculative_config,
+                )
 
                 if self.use_aux_hidden_state_outputs:
                     if not supports_eagle3(self.get_model()):

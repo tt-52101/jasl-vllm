@@ -41,6 +41,7 @@ def _create_vllm_config(
     compilation_config: CompilationConfig,
     max_num_seqs: int = 8,
     lora_config: bool = False,
+    num_speculative_tokens: int | None = None,
 ) -> MagicMock:
     mock_config = MagicMock(spec=VllmConfig)
     mock_config.compilation_config = compilation_config
@@ -48,7 +49,12 @@ def _create_vllm_config(
         max_num_seqs=max_num_seqs,
     )
     mock_config.parallel_config = ParallelConfig()
-    mock_config.speculative_config = None  # No speculative decoding
+    if num_speculative_tokens is None:
+        mock_config.speculative_config = None  # No speculative decoding
+    else:
+        mock_config.speculative_config = MagicMock(
+            num_speculative_tokens=num_speculative_tokens
+        )
     if not lora_config:
         mock_config.lora_config = None
     else:
@@ -203,6 +209,35 @@ class TestCudagraphDispatcher:
         )
         assert rt_mode == CUDAGraphMode.NONE
         assert key == BatchDescriptor(num_tokens=8)
+
+    def test_mtp_uniform_decode_does_not_fallback_to_relaxed_piecewise(self):
+        comp_config = CompilationConfig(
+            cudagraph_mode="FULL_AND_PIECEWISE",
+            mode=CompilationMode.VLLM_COMPILE,
+            cudagraph_capture_sizes=[3, 6],
+        )
+        config = _create_vllm_config(
+            comp_config,
+            max_num_seqs=8,
+            num_speculative_tokens=2,
+        )
+        dispatcher = CudagraphDispatcher(config)
+        dispatcher.initialize_cudagraph_keys(
+            cudagraph_mode=comp_config.cudagraph_mode,
+            uniform_decode_query_len=3,
+        )
+
+        rt_mode, key = dispatcher.dispatch(num_tokens=6, uniform_decode=True)
+        assert rt_mode == CUDAGraphMode.FULL
+        assert key == BatchDescriptor(num_tokens=6, num_reqs=2, uniform=True)
+
+        rt_mode, key = dispatcher.dispatch(
+            num_tokens=6,
+            uniform_decode=True,
+            invalid_modes={CUDAGraphMode.FULL},
+        )
+        assert rt_mode == CUDAGraphMode.NONE
+        assert key == BatchDescriptor(num_tokens=6)
 
     @pytest.mark.parametrize(
         "cudagraph_mode_str,compilation_mode,expected_modes",
