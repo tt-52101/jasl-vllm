@@ -166,6 +166,7 @@ if TYPE_CHECKING:
     VLLM_MOE_USE_DEEP_GEMM: bool = True
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
     VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES: bool = True
+    VLLM_TRITON_MLA_SPARSE_ALLOW_CUDAGRAPH: bool | None = None
     VLLM_DEEP_GEMM_WARMUP: Literal[
         "skip",
         "full",
@@ -1274,6 +1275,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to create TMA-aligned scale tensor when DeepGEMM is used.
     "VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES": lambda: bool(
         int(os.getenv("VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES", "1"))
+    ),
+    # Optional graph-capture override for the DeepSeek V4 Triton sparse MLA path.
+    "VLLM_TRITON_MLA_SPARSE_ALLOW_CUDAGRAPH": lambda: (
+        None
+        if os.getenv("VLLM_TRITON_MLA_SPARSE_ALLOW_CUDAGRAPH") is None
+        else os.getenv("VLLM_TRITON_MLA_SPARSE_ALLOW_CUDAGRAPH", "").lower()
+        in ("1", "true", "yes", "on")
     ),
     # DeepGemm JITs the kernels on-demand. The warmup attempts to make DeepGemm
     # JIT all the required kernels before model execution so there is no
