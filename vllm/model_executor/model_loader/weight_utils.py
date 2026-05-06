@@ -1107,6 +1107,8 @@ def _init_fastsafetensors_loader(
 def fastsafetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
+    local_expert_ids: set[int] | None = None,
+    weight_name_filter: Callable[[str], bool] | None = None,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files
     using fastsafetensor library."""
@@ -1153,6 +1155,12 @@ def fastsafetensors_weights_iterator(
             try:
                 keys = list(fb.key_to_rank_lidx.keys())
                 for k in keys:
+                    if _should_skip_safetensors_weight(
+                        k,
+                        local_expert_ids,
+                        weight_name_filter,
+                    ):
+                        continue
                     t = fb.get_tensor(k)
                     yield k, t
             finally:
