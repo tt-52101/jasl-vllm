@@ -169,7 +169,13 @@ if TYPE_CHECKING:
     VLLM_ENABLE_DEEPSEEK_V4_MHC_WARMUP: bool = True
     VLLM_DEEPSEEK_V4_MHC_WARMUP_TOKEN_SIZES: list[int] | None = None
     VLLM_ENABLE_DEEPSEEK_V4_SPARSE_MLA_WARMUP: bool = True
+    VLLM_TRITON_MLA_SPARSE: bool | None = None
+    VLLM_TRITON_MLA_SPARSE_TOPK_CHUNK_SIZE: int = 512
+    VLLM_TRITON_MLA_SPARSE_QUERY_CHUNK_SIZE: int = 256
     VLLM_TRITON_MLA_SPARSE_ALLOW_CUDAGRAPH: bool | None = None
+    VLLM_TRITON_MLA_SPARSE_HEAD_BLOCK_SIZE: int | None = None
+    VLLM_TRITON_MLA_SPARSE_MATMUL_DECODE: bool | None = None
+    VLLM_TRITON_MLA_SPARSE_SPLITKV_DECODE: bool = False
     VLLM_DEEP_GEMM_WARMUP: Literal[
         "skip",
         "full",
@@ -1298,11 +1304,39 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_DEEPSEEK_V4_SPARSE_MLA_WARMUP": lambda: bool(
         int(os.getenv("VLLM_ENABLE_DEEPSEEK_V4_SPARSE_MLA_WARMUP", "1"))
     ),
+    # Experimental sparse MLA fallback controls.
+    # ``VLLM_TRITON_MLA_SPARSE`` unset means auto-select where FlashMLA sparse
+    # is unavailable; set 0/1 to force-disable/force-enable the fallback.
+    "VLLM_TRITON_MLA_SPARSE": lambda: (
+        None
+        if os.getenv("VLLM_TRITON_MLA_SPARSE") is None
+        else os.getenv("VLLM_TRITON_MLA_SPARSE", "").lower()
+        in ("1", "true", "yes", "on")
+    ),
+    "VLLM_TRITON_MLA_SPARSE_TOPK_CHUNK_SIZE": lambda: maybe_convert_int(
+        os.getenv("VLLM_TRITON_MLA_SPARSE_TOPK_CHUNK_SIZE", "512")
+    ),
+    "VLLM_TRITON_MLA_SPARSE_QUERY_CHUNK_SIZE": lambda: maybe_convert_int(
+        os.getenv("VLLM_TRITON_MLA_SPARSE_QUERY_CHUNK_SIZE", "256")
+    ),
     # Optional graph-capture override for the DeepSeek V4 Triton sparse MLA path.
     "VLLM_TRITON_MLA_SPARSE_ALLOW_CUDAGRAPH": lambda: (
         None
         if os.getenv("VLLM_TRITON_MLA_SPARSE_ALLOW_CUDAGRAPH") is None
         else os.getenv("VLLM_TRITON_MLA_SPARSE_ALLOW_CUDAGRAPH", "").lower()
+        in ("1", "true", "yes", "on")
+    ),
+    "VLLM_TRITON_MLA_SPARSE_HEAD_BLOCK_SIZE": lambda: maybe_convert_int(
+        os.getenv("VLLM_TRITON_MLA_SPARSE_HEAD_BLOCK_SIZE")
+    ),
+    "VLLM_TRITON_MLA_SPARSE_MATMUL_DECODE": lambda: (
+        None
+        if os.getenv("VLLM_TRITON_MLA_SPARSE_MATMUL_DECODE") is None
+        else os.getenv("VLLM_TRITON_MLA_SPARSE_MATMUL_DECODE", "").lower()
+        in ("1", "true", "yes", "on")
+    ),
+    "VLLM_TRITON_MLA_SPARSE_SPLITKV_DECODE": lambda: (
+        os.getenv("VLLM_TRITON_MLA_SPARSE_SPLITKV_DECODE", "0").lower()
         in ("1", "true", "yes", "on")
     ),
     # DeepGemm JITs the kernels on-demand. The warmup attempts to make DeepGemm
