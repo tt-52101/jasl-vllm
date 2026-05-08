@@ -23,6 +23,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.config.load import LoadConfig
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.models.deepseek_v4_mtp import (
     DeepSeekV4MultiTokenPredictorLayer,
 )
@@ -34,7 +35,11 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.llm_base_proposer import compute_probs_and_sample_next_token
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
-from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.v1.worker import gpu_model_runner
+from vllm.v1.worker.gpu_model_runner import (
+    GPUModelRunner,
+    _enable_sync_mtp_logits_gather,
+)
 
 mimo_7b_dir = "XiaomiMiMo/MiMo-7B-Base"
 DEVICE_TYPE = current_platform.device_type
@@ -194,6 +199,45 @@ def test_deepseek_v4_mtp_layer_passes_input_ids_to_decoder_block():
     )
 
     assert layer.mtp_block.input_ids is input_ids
+
+
+@pytest.mark.parametrize(
+    ("method", "is_cuda", "is_sm12x", "expected"),
+    [
+        ("mtp", True, True, True),
+        ("eagle", True, True, False),
+        ("mtp", False, True, False),
+        ("mtp", True, False, False),
+    ],
+)
+def test_mtp_logits_gather_sync_is_enabled_only_for_sm12x_mtp(
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    is_cuda: bool,
+    is_sm12x: bool,
+    expected: bool,
+) -> None:
+    monkeypatch.setattr(
+        gpu_model_runner.current_platform, "is_cuda", lambda: is_cuda
+    )
+    monkeypatch.setattr(
+        gpu_model_runner.current_platform,
+        "is_device_capability_family",
+        lambda family: is_sm12x and family == 120,
+    )
+    target_logits = LogitsProcessor(vocab_size=8)
+    drafter_logits = LogitsProcessor(vocab_size=8)
+    target_model = torch.nn.ModuleList([target_logits])
+    drafter_model = torch.nn.ModuleList([drafter_logits])
+
+    _enable_sync_mtp_logits_gather(
+        target_model,
+        drafter_model,
+        mock.Mock(method=method),
+    )
+
+    assert target_logits.sync_after_gather is expected
+    assert drafter_logits.sync_after_gather is expected
 
 
 @pytest.mark.parametrize("num_speculative_tokens", [1])

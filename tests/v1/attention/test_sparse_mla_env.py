@@ -38,26 +38,18 @@ def _clear_sparse_mla_graph_env(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("VLLM_TRITON_MLA_SPARSE_ALLOW_CUDAGRAPH", raising=False)
 
 
-def test_sparse_mla_cudagraphs_default_to_disabled_without_mtp() -> None:
-    assert not triton_sparse_mla_cudagraphs_allowed(_vllm_config())
-
-
-def test_sparse_mla_cudagraphs_default_to_disabled_for_mtp() -> None:
-    assert not triton_sparse_mla_cudagraphs_allowed(
-        _vllm_config(num_speculative_tokens=2)
-    )
+def test_sparse_mla_cudagraphs_default_to_disabled() -> None:
+    assert not triton_sparse_mla_cudagraphs_allowed()
 
 
 def test_sparse_mla_cudagraph_env_overrides_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("VLLM_TRITON_MLA_SPARSE_ALLOW_CUDAGRAPH", "0")
-    assert not triton_sparse_mla_cudagraphs_allowed(_vllm_config())
+    assert not triton_sparse_mla_cudagraphs_allowed()
 
     monkeypatch.setenv("VLLM_TRITON_MLA_SPARSE_ALLOW_CUDAGRAPH", "1")
-    assert triton_sparse_mla_cudagraphs_allowed(
-        _vllm_config(num_speculative_tokens=2)
-    )
+    assert triton_sparse_mla_cudagraphs_allowed()
 
 
 def test_sparse_mla_cudagraph_env_is_registered(

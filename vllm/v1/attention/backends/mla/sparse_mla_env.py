@@ -64,7 +64,7 @@ def is_triton_sparse_mla_enabled(device: torch.device) -> bool:
     return _is_sm12x_device(device)
 
 
-def triton_sparse_mla_cudagraphs_allowed(vllm_config=None) -> bool:
+def triton_sparse_mla_cudagraphs_allowed() -> bool:
     configured = _optional_env_flag(_TRITON_MLA_SPARSE_ALLOW_CUDAGRAPH_ENV)
     if configured is not None:
         return configured
@@ -76,7 +76,7 @@ def disable_triton_sparse_mla_cudagraphs_if_enabled(vllm_config) -> None:
         return
 
     configured = _optional_env_flag(_TRITON_MLA_SPARSE_ALLOW_CUDAGRAPH_ENV)
-    if triton_sparse_mla_cudagraphs_allowed(vllm_config):
+    if triton_sparse_mla_cudagraphs_allowed():
         logger.warning_once(
             "Keeping the requested vLLM compile and CUDA graph settings for "
             "the DeepSeek V4 Triton sparse MLA path. Set "

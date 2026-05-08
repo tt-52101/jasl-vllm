@@ -212,7 +212,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         if (
             getattr(kv_cache_spec, "model_version", None) == "deepseek_v4"
             and is_triton_sparse_mla_enabled_for_platform()
-            and not triton_sparse_mla_cudagraphs_allowed(vllm_config)
+            and not triton_sparse_mla_cudagraphs_allowed()
         ):
             return AttentionCGSupport.NEVER
         return cls._cudagraph_support
