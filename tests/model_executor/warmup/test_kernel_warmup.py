@@ -50,7 +50,7 @@ def deepseek_v4_mtp_worker() -> SimpleNamespace:
     )
 
 
-def test_sparse_mla_warmup_covers_mtp_uniform_decode_and_spec_decode_kernels(
+def test_sparse_mla_warmup_covers_prefill_and_mtp_spec_decode_kernels(
     monkeypatch: pytest.MonkeyPatch,
     deepseek_v4_mtp_worker: SimpleNamespace,
 ) -> None:
@@ -84,10 +84,7 @@ def test_sparse_mla_warmup_covers_mtp_uniform_decode_and_spec_decode_kernels(
     kernel_warmup._deepseek_v4_sparse_mla_attention_warmup(deepseek_v4_mtp_worker)
 
     dummy_runs = deepseek_v4_mtp_worker.model_runner.dummy_runs
-    assert {run["num_tokens"] for run in dummy_runs if run.get("uniform_decode")} == {
-        3,
-        6,
-    }
+    assert all(not run.get("uniform_decode") for run in dummy_runs)
     assert any(run.get("create_mixed_batch") for run in dummy_runs)
     assert any(run.get("create_single_prefill") for run in dummy_runs)
     assert spec_decode_warmups == [

@@ -38,7 +38,7 @@ _DEEPSEEK_V4_SPARSE_MLA_BACKENDS = frozenset(
 )
 _DEEPSEEK_V4_SPARSE_MLA_MIXED_WARMUP_TOKENS = 16
 _DEEPSEEK_V4_SPARSE_MLA_PREFILL_WARMUP_TOKENS = 1024
-_DEEPSEEK_V4_MTP_UNIFORM_DECODE_WARMUP_REQUESTS = (1, 2)
+_DEEPSEEK_V4_MTP_SPEC_DECODE_WARMUP_REQUESTS = (1, 2)
 _DEEPSEEK_V4_SLOT_MAPPING_WARMUP_TOKENS = tuple(range(1, 17)) + (
     32,
     64,
@@ -79,27 +79,17 @@ def _is_deepseek_v4_mtp_spec_decode(runner: "GPUModelRunner") -> bool:
     )
 
 
-def _deepseek_v4_mtp_uniform_decode_warmup_requests(
+def _deepseek_v4_mtp_spec_decode_warmup_requests(
     runner: "GPUModelRunner",
-    max_tokens: int,
     max_reqs: int,
 ) -> tuple[int, ...]:
     if not _is_deepseek_v4_mtp_spec_decode(runner):
         return ()
 
-    query_len = getattr(
-        runner,
-        "uniform_decode_query_len",
-        1 + getattr(runner, "num_spec_tokens", 0),
-    )
-    if query_len <= 0:
-        return ()
-
-    max_warmup_reqs = min(max_reqs, max_tokens // query_len)
     return tuple(
         reqs
-        for reqs in _DEEPSEEK_V4_MTP_UNIFORM_DECODE_WARMUP_REQUESTS
-        if reqs <= max_warmup_reqs
+        for reqs in _DEEPSEEK_V4_MTP_SPEC_DECODE_WARMUP_REQUESTS
+        if reqs <= max_reqs
     )
 
 
@@ -331,21 +321,18 @@ def _deepseek_v4_sparse_mla_attention_warmup(worker: "Worker") -> None:
     prefill_tokens = _clamp_warmup_tokens(
         _DEEPSEEK_V4_SPARSE_MLA_PREFILL_WARMUP_TOKENS, max_tokens
     )
-    uniform_decode_reqs = _deepseek_v4_mtp_uniform_decode_warmup_requests(
+    spec_decode_reqs = _deepseek_v4_mtp_spec_decode_warmup_requests(
         runner,
-        max_tokens=max_tokens,
         max_reqs=worker.scheduler_config.max_num_seqs,
     )
-    if mixed_tokens <= 0 and prefill_tokens <= 0 and not uniform_decode_reqs:
+    if mixed_tokens <= 0 and prefill_tokens <= 0 and not spec_decode_reqs:
         return
 
     logger.info(
         "Warming up DeepSeek V4 sparse MLA attention "
-        "for mixed tokens=%s, prefill tokens=%s, and MTP uniform decode "
-        "requests=%s.",
+        "for mixed tokens=%s and prefill tokens=%s.",
         mixed_tokens,
         prefill_tokens,
-        list(uniform_decode_reqs),
     )
     if mixed_tokens > 0:
         runner._dummy_run(
@@ -363,26 +350,16 @@ def _deepseek_v4_sparse_mla_attention_warmup(worker: "Worker") -> None:
             force_attention=True,
             create_single_prefill=True,
         )
-    query_len = getattr(runner, "uniform_decode_query_len", 0)
-    for num_reqs in uniform_decode_reqs:
-        runner._dummy_run(
-            num_tokens=num_reqs * query_len,
-            skip_eplb=True,
-            is_profile=True,
-            force_attention=True,
-            uniform_decode=True,
-        )
-
-    if uniform_decode_reqs and current_platform.is_cuda_alike():
+    if spec_decode_reqs and current_platform.is_cuda_alike():
         vocab_size = runner.model_config.get_vocab_size()
         block_size = getattr(runner.cache_config, "block_size", None) or 16
         logger.info(
             "Warming up DeepSeek V4 MTP spec-decode kernels for request "
             "counts=%s and %d draft tokens.",
-            list(uniform_decode_reqs),
+            list(spec_decode_reqs),
             runner.num_spec_tokens,
         )
-        for num_reqs in uniform_decode_reqs:
+        for num_reqs in spec_decode_reqs:
             _run_deepseek_v4_mtp_spec_decode_warmup_kernels(
                 device=runner.device,
                 num_reqs=num_reqs,
