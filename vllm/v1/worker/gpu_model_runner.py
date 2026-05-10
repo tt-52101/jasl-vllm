@@ -6419,15 +6419,12 @@ class GPUModelRunner(
     ):
         if num_warmups is None:
             num_warmups = self.compilation_config.cudagraph_num_of_warmups
-        force_attention_for_warmup = cudagraph_runtime_mode in (
-            CUDAGraphMode.FULL,
-            CUDAGraphMode.PIECEWISE,
-        )
+        force_attention = cudagraph_runtime_mode == CUDAGraphMode.FULL
         for _ in range(num_warmups):
             self._dummy_run(
                 desc.num_tokens,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
-                force_attention=force_attention_for_warmup,
+                force_attention=force_attention,
                 uniform_decode=desc.uniform,
                 allow_microbatching=allow_microbatching,
                 skip_eplb=True,

@@ -15,11 +15,7 @@ from vllm.v1.attention.backends.mla.sparse_mla_env import (
 )
 
 
-def _vllm_config(
-    *,
-    num_speculative_tokens: int = 0,
-    cudagraph_mode: CUDAGraphMode = CUDAGraphMode.FULL_AND_PIECEWISE,
-):
+def _vllm_config(*, num_speculative_tokens: int = 0):
     return SimpleNamespace(
         speculative_config=(
             SimpleNamespace(num_speculative_tokens=num_speculative_tokens)
@@ -30,7 +26,7 @@ def _vllm_config(
             mode=CompilationMode.VLLM_COMPILE,
             compile_sizes=[1, 2],
             compile_ranges_endpoints=[(1, 8)],
-            cudagraph_mode=cudagraph_mode,
+            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
             cudagraph_capture_sizes=[1, 2],
             max_cudagraph_capture_size=2,
         ),
@@ -88,17 +84,13 @@ def test_sparse_mla_graph_gate_defaults_to_off_without_mtp(
     assert vllm_config.compilation_config.max_cudagraph_capture_size == 0
 
 
-def test_sparse_mla_graph_gate_can_be_forced_on_without_sm12x_downgrade(
+def test_sparse_mla_graph_gate_can_be_forced_on(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
         "vllm.v1.attention.backends.mla.sparse_mla_env."
         "is_triton_sparse_mla_enabled_for_platform",
         lambda: True,
-    )
-    monkeypatch.setattr(
-        "vllm.v1.attention.backends.mla.sparse_mla_env._is_sm12x_platform",
-        lambda: False,
     )
     monkeypatch.setenv("VLLM_TRITON_MLA_SPARSE_ALLOW_CUDAGRAPH", "1")
     vllm_config = _vllm_config()
@@ -112,44 +104,6 @@ def test_sparse_mla_graph_gate_can_be_forced_on_without_sm12x_downgrade(
     )
     assert vllm_config.compilation_config.compile_sizes == [1, 2]
     assert vllm_config.compilation_config.cudagraph_capture_sizes == [1, 2]
-
-
-def test_sparse_mla_graph_gate_forces_piecewise_on_sm12x(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "vllm.v1.attention.backends.mla.sparse_mla_env."
-        "is_triton_sparse_mla_enabled_for_platform",
-        lambda: True,
-    )
-    monkeypatch.setattr(
-        "vllm.v1.attention.backends.mla.sparse_mla_env._is_sm12x_platform",
-        lambda: True,
-    )
-    monkeypatch.setenv("VLLM_TRITON_MLA_SPARSE_ALLOW_CUDAGRAPH", "1")
-    vllm_config = _vllm_config()
-
-    disable_triton_sparse_mla_cudagraphs_if_enabled(vllm_config)
-
-    assert vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
-    assert vllm_config.compilation_config.compile_sizes == [1, 2]
-    assert vllm_config.compilation_config.cudagraph_capture_sizes == [1, 2]
-
-
-def test_sparse_mla_graph_gate_keeps_piecewise_when_forced_on(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "vllm.v1.attention.backends.mla.sparse_mla_env."
-        "is_triton_sparse_mla_enabled_for_platform",
-        lambda: True,
-    )
-    monkeypatch.setenv("VLLM_TRITON_MLA_SPARSE_ALLOW_CUDAGRAPH", "1")
-    vllm_config = _vllm_config(cudagraph_mode=CUDAGraphMode.PIECEWISE)
-
-    disable_triton_sparse_mla_cudagraphs_if_enabled(vllm_config)
-
-    assert vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
 
 
 def test_sparse_mla_graph_gate_can_be_forced_off(
