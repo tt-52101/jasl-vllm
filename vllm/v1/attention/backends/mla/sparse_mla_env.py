@@ -30,6 +30,13 @@ def _optional_env_flag(name: str) -> bool | None:
         return True
     if value in _ENV_FALSE_VALUES:
         return False
+    logger.warning(
+        "Ignoring unrecognized value %r for env var %s; expected one of %s. "
+        "Falling back to platform default.",
+        raw_value,
+        name,
+        sorted(_ENV_TRUE_VALUES | _ENV_FALSE_VALUES),
+    )
     return None
 
 
@@ -63,24 +70,37 @@ def is_triton_sparse_mla_enabled(device: torch.device) -> bool:
     return _is_sm12x_device(device)
 
 
-def triton_sparse_mla_topk_chunk_size() -> int:
-    raw_value = os.getenv(_TRITON_MLA_SPARSE_TOPK_CHUNK_ENV)
+def _positive_int_env(name: str, default: int) -> int:
+    raw_value = os.getenv(name)
     if raw_value is None:
-        return 512
+        return default
     try:
-        return max(1, int(raw_value))
+        parsed = int(raw_value)
     except ValueError:
-        return 512
+        logger.warning(
+            "Ignoring non-integer value %r for env var %s; using default %d.",
+            raw_value,
+            name,
+            default,
+        )
+        return default
+    if parsed < 1:
+        logger.warning(
+            "Ignoring non-positive value %d for env var %s; using default %d.",
+            parsed,
+            name,
+            default,
+        )
+        return default
+    return parsed
+
+
+def triton_sparse_mla_topk_chunk_size() -> int:
+    return _positive_int_env(_TRITON_MLA_SPARSE_TOPK_CHUNK_ENV, 512)
 
 
 def triton_sparse_mla_query_chunk_size() -> int:
-    raw_value = os.getenv(_TRITON_MLA_SPARSE_QUERY_CHUNK_ENV)
-    if raw_value is None:
-        return 256
-    try:
-        return max(1, int(raw_value))
-    except ValueError:
-        return 256
+    return _positive_int_env(_TRITON_MLA_SPARSE_QUERY_CHUNK_ENV, 256)
 
 
 def triton_sparse_mla_head_block_size() -> int | None:
@@ -90,9 +110,19 @@ def triton_sparse_mla_head_block_size() -> int | None:
     try:
         value = int(raw_value)
     except ValueError:
+        logger.warning(
+            "Ignoring non-integer value %r for env var %s.",
+            raw_value,
+            _TRITON_MLA_SPARSE_HEAD_BLOCK_ENV,
+        )
         return None
     if value in (1, 2, 4):
         return value
+    logger.warning(
+        "Ignoring unsupported value %d for env var %s; expected one of (1, 2, 4).",
+        value,
+        _TRITON_MLA_SPARSE_HEAD_BLOCK_ENV,
+    )
     return None
 
 
