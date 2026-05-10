@@ -199,6 +199,14 @@ def deepseek_v4_mhc_warmup(
     if not envs.VLLM_ENABLE_DEEPSEEK_V4_MHC_WARMUP:
         return
 
+    # Cheap model-type gate before walking ``model.modules()``. The class
+    # walk below is O(num_layers) and shows up in startup time on very
+    # large checkpoints; bail out for any model that is not DeepSeek V4.
+    config = getattr(model, "config", None)
+    model_type = getattr(config, "model_type", None) if config is not None else None
+    if model_type is not None and model_type != "deepseek_v4":
+        return
+
     layer = _find_first_mhc_layer(model)
     if layer is None:
         return
