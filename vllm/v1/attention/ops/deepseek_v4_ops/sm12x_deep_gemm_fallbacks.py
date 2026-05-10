@@ -4,7 +4,10 @@
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
+
+logger = init_logger(__name__)
 
 _SM120_MQA_LOGITS_MAX_SCORE_BYTES = 64 * 1024 * 1024
 _SM120_PAGED_MQA_TOPK_CHUNK_SIZE = 8192
@@ -344,6 +347,17 @@ def _fp8_paged_mqa_logits_sm12x(
         return fp8_paged_mqa_logits_triton(
             q_values, kv_cache, weights, context_lens, block_tables, max_model_len
         )
+    logger.warning_once(
+        "SM12x paged-MQA falling back to the torch reference path "
+        "(q_scale=%s, q.dim=%s, kv_cache.dtype=%s, kv_cache.shape[-1]=%s, "
+        "q_values.shape[-1]=%s). This path is intended for correctness checks "
+        "and is not graph-compatible; expect a large per-step latency.",
+        "set" if q_scale is not None else "None",
+        q_values.dim(),
+        kv_cache.dtype,
+        kv_cache.shape[-1] if kv_cache.dim() else None,
+        q_values.shape[-1],
+    )
     return _fp8_paged_mqa_logits_torch(
         q, kv_cache, weights, context_lens, block_tables, max_model_len
     )
