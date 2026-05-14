@@ -19,6 +19,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.mla.sparse_mla_env import (
     is_triton_sparse_mla_enabled,
     is_triton_sparse_mla_enabled_for_platform,
+    triton_sparse_mla_cudagraphs_allowed,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.flashmla import FlashMLASchedMeta, get_mla_metadata
@@ -217,7 +218,10 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         if (
             getattr(kv_cache_spec, "model_version", None) == "deepseek_v4"
             and is_triton_sparse_mla_enabled_for_platform()
+            and not triton_sparse_mla_cudagraphs_allowed(vllm_config)
         ):
+            # Spec-decode (MTP) path: query_len > 1 on decode, which the
+            # cudagraph capture cannot represent. Keep the hard kill-switch.
             return AttentionCGSupport.NEVER
         return cls._cudagraph_support
 
