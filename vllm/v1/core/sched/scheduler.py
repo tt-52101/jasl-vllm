@@ -390,6 +390,11 @@ class Scheduler(SchedulerInterface):
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens = min(num_new_tokens, token_budget)
+            num_new_tokens = self._limit_mixed_prefill_chunk(
+                request,
+                num_new_tokens,
+                scheduled_running_reqs,
+            )
 
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
@@ -667,6 +672,11 @@ class Scheduler(SchedulerInterface):
                         break
 
                     num_new_tokens = min(num_new_tokens, token_budget)
+                    num_new_tokens = self._limit_mixed_prefill_chunk(
+                        request,
+                        num_new_tokens,
+                        scheduled_running_reqs,
+                    )
                     assert num_new_tokens > 0
 
                     # Schedule encoder inputs.
@@ -1615,6 +1625,28 @@ class Scheduler(SchedulerInterface):
             self.skipped_waiting.add_request(request)
         else:
             self.waiting.add_request(request)
+
+    def _has_scheduled_decode(self, requests: list[Request]) -> bool:
+        return any(
+            request.num_computed_tokens >= request.num_prompt_tokens
+            for request in requests
+        )
+
+    def _limit_mixed_prefill_chunk(
+        self,
+        request: Request,
+        num_new_tokens: int,
+        scheduled_running_reqs: list[Request],
+    ) -> int:
+        if (
+            not self.scheduler_config.enable_chunked_prefill
+            or request.num_computed_tokens >= request.num_prompt_tokens
+            or not self._has_scheduled_decode(scheduled_running_reqs)
+        ):
+            return num_new_tokens
+
+        mixed_prefill_budget = max(1, self.max_num_scheduled_tokens // 3)
+        return min(num_new_tokens, mixed_prefill_budget)
 
     def _select_waiting_queue_for_scheduling(self) -> RequestQueue | None:
         if self.policy == SchedulingPolicy.FCFS:

@@ -684,6 +684,39 @@ def test_schedule_order(enable_chunked_prefill: bool):
         assert len(scheduler_output1.scheduled_new_reqs) == 1
 
 
+def test_mixed_decode_prefill_caps_long_prefill_chunk():
+    scheduler = create_scheduler(
+        max_num_batched_tokens=100,
+        max_model_len=512,
+        max_num_seqs=2,
+        enable_chunked_prefill=True,
+    )
+    requests = create_requests(num_requests=2, num_tokens=100, req_ids=["1", "2"])
+    requests[1].prompt_token_ids.extend(range(100, 300))
+
+    scheduler.add_request(requests[0])
+    prefill_output = scheduler.schedule()
+    assert prefill_output.num_scheduled_tokens[requests[0].request_id] == 100
+
+    scheduler.update_from_output(
+        prefill_output,
+        ModelRunnerOutput(
+            req_ids=[requests[0].request_id],
+            req_id_to_index={requests[0].request_id: 0},
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    scheduler.add_request(requests[1])
+    mixed_output = scheduler.schedule()
+
+    assert mixed_output.num_scheduled_tokens[requests[0].request_id] == 1
+    assert mixed_output.num_scheduled_tokens[requests[1].request_id] <= 33
+
+
 def test_preempt_during_execution():
     # NOTE(woosuk): The actual number of available blocks is 10 instead of 11
     # because block 0 is reserved as the null block.
