@@ -206,6 +206,98 @@ def test_schedule_partial_requests():
     assert requests[2].request_id not in output.num_scheduled_tokens
 
 
+def test_short_waiting_prefill_gets_budget_while_long_prefill_is_running():
+    scheduler = create_scheduler(
+        max_num_seqs=2,
+        max_num_batched_tokens=100,
+        max_model_len=512,
+    )
+    long_req = create_requests(
+        num_requests=1,
+        num_tokens=400,
+        req_ids=["long"],
+    )[0]
+    short_req = create_requests(
+        num_requests=1,
+        num_tokens=40,
+        req_ids=["short"],
+    )[0]
+
+    scheduler.add_request(long_req)
+    first = scheduler.schedule()
+    assert first.num_scheduled_tokens["long"] == 100
+    scheduler.update_from_output(
+        first,
+        ModelRunnerOutput(
+            req_ids=["long"],
+            req_id_to_index={"long": 0},
+            sampled_token_ids=[[]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    scheduler.add_request(short_req)
+    second = scheduler.schedule()
+
+    assert second.num_scheduled_tokens["long"] == 75
+    assert second.num_scheduled_tokens["short"] == 25
+
+
+def test_short_running_partial_prefill_keeps_budget_behind_long_prefill():
+    scheduler = create_scheduler(
+        max_num_seqs=2,
+        max_num_batched_tokens=100,
+        max_model_len=512,
+    )
+    long_req = create_requests(
+        num_requests=1,
+        num_tokens=400,
+        req_ids=["long"],
+    )[0]
+    short_req = create_requests(
+        num_requests=1,
+        num_tokens=140,
+        req_ids=["short"],
+    )[0]
+
+    scheduler.add_request(long_req)
+    first = scheduler.schedule()
+    scheduler.update_from_output(
+        first,
+        ModelRunnerOutput(
+            req_ids=["long"],
+            req_id_to_index={"long": 0},
+            sampled_token_ids=[[]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    scheduler.add_request(short_req)
+    second = scheduler.schedule()
+    assert second.num_scheduled_tokens["long"] == 75
+    assert second.num_scheduled_tokens["short"] == 25
+    scheduler.update_from_output(
+        second,
+        ModelRunnerOutput(
+            req_ids=["long", "short"],
+            req_id_to_index={"long": 0, "short": 1},
+            sampled_token_ids=[[], []],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    third = scheduler.schedule()
+
+    assert third.num_scheduled_tokens["long"] == 75
+    assert third.num_scheduled_tokens["short"] == 25
+
+
 def test_no_mm_input_chunking():
     # Disable multimodal input chunking.
     scheduler = create_scheduler(

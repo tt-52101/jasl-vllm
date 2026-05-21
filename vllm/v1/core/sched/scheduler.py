@@ -326,6 +326,52 @@ class Scheduler(SchedulerInterface):
                 pass
         return num_new_tokens
 
+    def _is_prefill_request(
+        self, request: Request, num_computed_tokens: int | None = None
+    ) -> bool:
+        computed = (
+            request.num_computed_tokens
+            if num_computed_tokens is None
+            else num_computed_tokens
+        )
+        return computed < request.num_prompt_tokens
+
+    def _short_prefill_competitor_reserve(
+        self,
+        token_budget: int,
+        running_after: Iterable[Request],
+    ) -> int:
+        if token_budget <= 1:
+            return 0
+        short_prefill_limit = self.max_num_scheduled_tokens * 2
+        candidates = itertools.chain(running_after, self.waiting, self.skipped_waiting)
+        for request in candidates:
+            if request.status not in (RequestStatus.RUNNING, RequestStatus.WAITING):
+                continue
+            remaining_prefill = request.num_prompt_tokens - request.num_computed_tokens
+            if 0 < remaining_prefill <= short_prefill_limit:
+                return min(remaining_prefill, token_budget // 4)
+        return 0
+
+    def _reserve_for_short_waiting_prefill(
+        self,
+        request: Request,
+        num_new_tokens: int,
+        token_budget: int,
+        running_after: Iterable[Request],
+    ) -> int:
+        if not self._is_prefill_request(request):
+            return num_new_tokens
+        remaining_prefill = request.num_prompt_tokens - request.num_computed_tokens
+        if remaining_prefill <= self.max_num_scheduled_tokens * 2:
+            return num_new_tokens
+        reserve = self._short_prefill_competitor_reserve(
+            token_budget, running_after
+        )
+        if reserve <= 0:
+            return num_new_tokens
+        return min(num_new_tokens, max(1, token_budget - reserve))
+
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -389,6 +435,9 @@ class Scheduler(SchedulerInterface):
             )
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
+            num_new_tokens = self._reserve_for_short_waiting_prefill(
+                request, num_new_tokens, token_budget, self.running[req_index + 1 :]
+            )
             num_new_tokens = min(num_new_tokens, token_budget)
 
             # Make sure the input position does not exceed the max model len.
