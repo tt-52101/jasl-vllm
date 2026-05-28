@@ -35,6 +35,7 @@ from vllm.model_executor.layers.mhc import (
     MHCFusedPostPreOp,
     MHCPostOp,
     MHCPreOp,
+    warm_up_cuda_tilelang_mhc,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -1101,6 +1102,13 @@ class DeepseekV4Model(nn.Module):
         )
 
         self.device = current_platform.device_type
+        warm_up_cuda_tilelang_mhc(
+            config.hidden_size,
+            self.hc_mult,
+            vllm_config.model_config.dtype,
+            self.device,
+        )
+
         # Reserved topk indices buffer for all Indexer layers to reuse.
         self.topk_indices_buffer = torch.empty(
             vllm_config.scheduler_config.max_num_batched_tokens,
