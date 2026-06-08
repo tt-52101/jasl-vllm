@@ -175,6 +175,40 @@ class TestNarrowExpertDataForPadding:
         assert torch.equal(expert_data[2688:, :], torch.zeros(3072 - 2688, 1024))
 
 
+class TestNormalizeLoadedWeightForCopy:
+    """Unit tests for dtype adaptation before copying loaded weights."""
+
+    def test_e8m0_loaded_weight_can_copy_into_uint8_storage(self):
+        e8m0_dtype = getattr(torch, "float8_e8m0fnu", None)
+        if e8m0_dtype is None:
+            pytest.skip("torch build does not expose float8_e8m0fnu")
+
+        target = torch.empty(4, dtype=torch.uint8)
+        raw_scale = torch.tensor([127, 128, 129, 130], dtype=torch.uint8)
+        loaded_weight = raw_scale.view(e8m0_dtype)
+
+        normalized = RoutedExperts._normalize_loaded_weight_for_copy(
+            target,
+            loaded_weight,
+        )
+
+        assert normalized.dtype == torch.uint8
+        assert normalized.data_ptr() == loaded_weight.data_ptr()
+        target.copy_(normalized)
+        assert torch.equal(target, raw_scale)
+
+    def test_non_e8m0_loaded_weight_is_unchanged(self):
+        target = torch.empty(4, dtype=torch.float32)
+        loaded_weight = torch.arange(4, dtype=torch.float32)
+
+        normalized = RoutedExperts._normalize_loaded_weight_for_copy(
+            target,
+            loaded_weight,
+        )
+
+        assert normalized is loaded_weight
+
+
 class TestWeightLoadingWithPaddedHiddenSize:
     """Integration-style tests that simulate padded weight loading."""
 
