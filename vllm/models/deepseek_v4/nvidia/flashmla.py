@@ -280,6 +280,87 @@ def _sparse_mla_candidate_region_overlap_summary(
     }
 
 
+def _sparse_mla_candidate_stream_shape_groups(
+    per_row: list[list[int]],
+    *,
+    shifted: bool,
+) -> dict[str, dict[str, float | int]]:
+    rows = len(per_row)
+    group_summaries: dict[str, dict[str, float | int]] = {}
+    for group_size in (2, 4, 8, 16, 32):
+        groups = 0
+        comparisons = 0
+        matches = 0
+        for start in range(0, rows, group_size):
+            group = per_row[start : start + group_size]
+            if len(group) < group_size:
+                break
+            comparable_positions = min(len(values) for values in group)
+            if comparable_positions <= 0:
+                continue
+            groups += 1
+            comparisons += comparable_positions * (group_size - 1)
+            for position in range(comparable_positions):
+                base = group[0][position]
+                for row_offset, values in enumerate(group[1:], start=1):
+                    expected = base + row_offset if shifted else base
+                    if values[position] == expected:
+                        matches += 1
+        group_summaries[str(group_size)] = {
+            "groups": groups,
+            "position_comparisons": comparisons,
+            "same_position_matches": matches,
+            "same_position_ratio": (
+                float(matches) / float(comparisons) if comparisons else 0.0
+            ),
+        }
+        if shifted:
+            group_summaries[str(group_size)]["shifted_position_ratio"] = (
+                float(matches) / float(comparisons) if comparisons else 0.0
+            )
+    return group_summaries
+
+
+def _sparse_mla_candidate_stream_shape_summary(
+    combined_indices: torch.Tensor,
+    combined_lens: torch.Tensor,
+    sample_rows: int,
+    gather_region_size: int,
+    swa_region_offset: int,
+) -> dict[str, object]:
+    if sample_rows <= 0 or gather_region_size <= 0:
+        return {}
+    per_row = _sparse_mla_candidate_rows(
+        combined_indices=combined_indices,
+        combined_lens=combined_lens,
+        sample_rows=sample_rows,
+    )
+    compressed_rows: list[list[int]] = []
+    swa_rows: list[list[int]] = []
+    for values in per_row:
+        compressed: list[int] = []
+        swa: list[int] = []
+        for value in values:
+            local = value % gather_region_size
+            if local < swa_region_offset:
+                compressed.append(value)
+            else:
+                swa.append(value)
+        compressed_rows.append(compressed)
+        swa_rows.append(swa)
+    return {
+        "sample_rows": len(per_row),
+        "compressed": _sparse_mla_candidate_stream_shape_groups(
+            compressed_rows,
+            shifted=False,
+        ),
+        "swa": _sparse_mla_candidate_stream_shape_groups(
+            swa_rows,
+            shifted=True,
+        ),
+    }
+
+
 def _sparse_mla_candidate_region_work_summary(
     *,
     query_tokens: int,
@@ -432,6 +513,15 @@ def _write_sparse_mla_prefill_stats(
             )
             row["candidate_region_overlap"] = (
                 _sparse_mla_candidate_region_overlap_summary(
+                    combined_indices=combined_indices,
+                    combined_lens=combined_lens,
+                    sample_rows=overlap_rows,
+                    gather_region_size=gather_region_size,
+                    swa_region_offset=swa_region_offset,
+                )
+            )
+            row["candidate_stream_shape"] = (
+                _sparse_mla_candidate_stream_shape_summary(
                     combined_indices=combined_indices,
                     combined_lens=combined_lens,
                     sample_rows=overlap_rows,

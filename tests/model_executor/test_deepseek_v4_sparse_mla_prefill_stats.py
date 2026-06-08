@@ -61,7 +61,7 @@ def test_sparse_mla_prefill_stats_writer_emits_region_and_overlap(
         combined_indices=torch.tensor(
             [
                 [0, 1, 4, 5],
-                [0, 2, 4, 7],
+                [0, 2, 5, 6],
             ],
             dtype=torch.int32,
         ),
@@ -93,3 +93,9 @@ def test_sparse_mla_prefill_stats_writer_emits_region_and_overlap(
     assert row["candidate_region_overlap"]["swa"]["2"][
         "unique_to_valid_ratio"
     ] == 2 / 3
+    assert row["candidate_stream_shape"]["compressed"]["2"][
+        "same_position_ratio"
+    ] == 0.5
+    assert row["candidate_stream_shape"]["swa"]["2"][
+        "shifted_position_ratio"
+    ] == 1.0
