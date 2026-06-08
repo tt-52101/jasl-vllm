@@ -72,6 +72,8 @@ def test_sparse_mla_prefill_stats_writer_emits_region_and_overlap(
         compressed_candidate_visits=3,
         swa_candidate_visits=4,
         stage_timings_ms={"combine_indices": 1.25},
+        prefill_start_position=123,
+        route_stats={"indexed_d512_scores": 2},
     )
 
     rows = [
@@ -86,6 +88,8 @@ def test_sparse_mla_prefill_stats_writer_emits_region_and_overlap(
     assert row["candidate_region_work"]["compressed"]["effective_candidate_visits"] == 3
     assert row["candidate_region_work"]["swa"]["effective_candidate_visits"] == 4
     assert row["stage_timings_ms"] == {"combine_indices": 1.25}
+    assert row["prefill_start_position"] == 123
+    assert row["route_stats"] == {"indexed_d512_scores": 2}
     assert row["candidate_overlap"]["groups"]["2"]["unique_candidates"] == 5
     assert row["candidate_region_overlap"]["compressed"]["2"][
         "unique_to_valid_ratio"

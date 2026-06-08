@@ -456,6 +456,8 @@ def _write_sparse_mla_prefill_stats(
     compressed_candidate_visits: int | None = None,
     swa_candidate_visits: int | None = None,
     stage_timings_ms: dict[str, float] | None = None,
+    prefill_start_position: int | None = None,
+    route_stats: dict[str, int] | None = None,
 ) -> None:
     if not _sparse_mla_prefill_stats_enabled():
         return
@@ -489,6 +491,8 @@ def _write_sparse_mla_prefill_stats(
             "padding_candidate_visits": padding_visits,
             "combined_lens": lens_summary,
         }
+        if prefill_start_position is not None:
+            row["prefill_start_position"] = int(prefill_start_position)
         region_work = _sparse_mla_candidate_region_work_summary(
             query_tokens=int(query_tokens),
             combined_topk=int(combined_topk),
@@ -503,6 +507,11 @@ def _write_sparse_mla_prefill_stats(
             row["stage_timings_ms"] = {
                 str(name): float(value)
                 for name, value in sorted(stage_timings_ms.items())
+            }
+        if route_stats:
+            row["route_stats"] = {
+                str(name): int(value)
+                for name, value in sorted(route_stats.items())
             }
         overlap_rows = envs.VLLM_DEEPSEEK_V4_SPARSE_MLA_STATS_OVERLAP_ROWS
         if combined_indices is not None and overlap_rows > 0:
@@ -1087,6 +1096,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         combined_lens: torch.Tensor,
         output: torch.Tensor,
         state_buffers: tuple[torch.Tensor, ...] | None = None,
+        route_stats: dict[str, int] | None = None,
     ) -> None:
         kv_flat = kv.reshape(-1, q.shape[-1])
         topk_chunk_size = triton_sparse_mla_prefill_topk_chunk_size(
@@ -1136,6 +1146,10 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         ):
             indexed_d512_chunked_buffers = state_buffers[3:7]
 
+        def bump_route_stat(name: str) -> None:
+            if route_stats is not None:
+                route_stats[name] = route_stats.get(name, 0) + 1
+
         for token_start in range(0, q.shape[0], query_chunk_size):
             token_end = min(token_start + query_chunk_size, q.shape[0])
             q_chunk = q[token_start:token_end]
@@ -1156,6 +1170,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             )
             output_finished = False
             if can_use_indexed_d512_scores:
+                bump_route_stat("indexed_d512_scores")
                 assert indexed_d512_scores is not None
                 d512_scores = indexed_d512_scores[
                     :num_tokens, :, : combined_indices.shape[-1]
@@ -1187,6 +1202,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                         scores=d512_scores,
                     )
             elif can_use_indexed_d512_chunked:
+                bump_route_stat("indexed_d512_chunked")
                 assert indexed_d512_chunked_buffers is not None
                 (
                     indexed_d512_scores,
@@ -1209,6 +1225,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                     chunk_acc=chunk_acc[:num_tokens],
                 )
             else:
+                bump_route_stat("chunked_attention")
                 max_score.fill_(float("-inf"))
                 denom.zero_()
                 subset_acc.zero_()
@@ -1526,6 +1543,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             prefill_state_buffers = None
         for chunk_idx in range(num_chunks):
             write_stats = _sparse_mla_prefill_stats_enabled()
+            route_stats: dict[str, int] | None = {} if write_stats else None
             stage_timer = (
                 _SparseMLAPrefillStageTimer()
                 if _sparse_mla_prefill_stage_timing_enabled()
@@ -1579,6 +1597,13 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             query_end = (
                 query_start_loc_cpu[num_decodes + chunk_end] - prefill_token_base
             )
+            query_len = int(query_end - query_start)
+            prefill_start_position = int(query_start)
+            if chunk_size == 1:
+                prefill_start_position = max(
+                    0,
+                    int(seq_lens_cpu[chunk_start].item()) - query_len,
+                )
 
             with (
                 stage_timer.stage("combine_indices")
@@ -1614,6 +1639,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                         combined_lens=combined_lens,
                         output=output[query_start:query_end],
                         state_buffers=prefill_state_buffers,
+                        route_stats=route_stats,
                     )
             else:
                 with (
@@ -1664,6 +1690,8 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                     swa_region_width=self.window_size,
                     compressed_candidate_visits=compressed_visits,
                     swa_candidate_visits=swa_visits,
+                    prefill_start_position=prefill_start_position,
+                    route_stats=route_stats,
                     stage_timings_ms=(
                         stage_timer.elapsed_ms()
                         if stage_timer is not None
