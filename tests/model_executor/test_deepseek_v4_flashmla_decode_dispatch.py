@@ -144,3 +144,141 @@ def test_compressed_decode_uses_triton_path_without_flashmla_tile_sched(monkeypa
             (1, 2, 512),
         )
     ]
+
+
+def test_indexed_d512_prefill_uses_fused_sink_finish(monkeypatch):
+    layer = _make_layer(compress_ratio=128)
+    q = torch.empty(4, 2, 512)
+    kv = torch.empty(1, 4, 512)
+    output = torch.empty_like(q)
+    combined_indices = torch.zeros((4, 640), dtype=torch.int32)
+    combined_lens = torch.full((4,), 640, dtype=torch.int32)
+    max_score_buffer = torch.empty(2, 2)
+    denom_buffer = torch.empty(2, 2)
+    output_buffer = torch.empty(2, 2, 512)
+    scores = torch.empty(2, 2, 640)
+    calls = []
+
+    def fake_fused(**kwargs):
+        calls.append(("fused", kwargs["q"].shape, kwargs["output"].shape))
+
+    def fake_finish(*args, **kwargs):
+        calls.append(("finish", kwargs["output"].shape))
+
+    monkeypatch.setattr(flashmla_mod, "triton_sparse_mla_query_chunk_size", lambda: 2)
+    monkeypatch.setattr(
+        flashmla_mod.envs,
+        "VLLM_DEEPSEEK_V4_INDEXED_D512_FUSED_SINK_PREFILL",
+        True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        flashmla_mod,
+        "triton_sparse_mla_prefill_topk_chunk_size",
+        lambda **_: 640,
+    )
+    monkeypatch.setattr(
+        flashmla_mod,
+        "accumulate_indexed_d512_split_sparse_mla_attention_with_sink",
+        fake_fused,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        flashmla_mod,
+        "finish_sparse_mla_attention_with_sink",
+        fake_finish,
+    )
+
+    DeepseekV4FlashMLAAttention._forward_sparse_mla_prefill_triton(
+        layer=layer,
+        q=q,
+        kv=kv,
+        combined_indices=combined_indices,
+        combined_lens=combined_lens,
+        output=output,
+        state_buffers=(
+            max_score_buffer,
+            denom_buffer,
+            output_buffer,
+            scores,
+        ),
+    )
+
+    assert calls == [
+        ("fused", torch.Size([2, 2, 512]), torch.Size([2, 2, 512])),
+        ("fused", torch.Size([2, 2, 512]), torch.Size([2, 2, 512])),
+    ]
+
+
+def test_indexed_d512_prefill_keeps_split_finish_without_fused_sink(monkeypatch):
+    layer = _make_layer(compress_ratio=128)
+    q = torch.empty(4, 2, 512)
+    kv = torch.empty(1, 4, 512)
+    output = torch.empty_like(q)
+    combined_indices = torch.zeros((4, 640), dtype=torch.int32)
+    combined_lens = torch.full((4,), 640, dtype=torch.int32)
+    max_score_buffer = torch.empty(2, 2)
+    denom_buffer = torch.empty(2, 2)
+    output_buffer = torch.empty(2, 2, 512)
+    scores = torch.empty(2, 2, 640)
+    calls = []
+
+    def fake_split(**kwargs):
+        calls.append(("split", kwargs["q"].shape))
+
+    def fake_fused(**kwargs):
+        calls.append(("fused", kwargs["q"].shape, kwargs["output"].shape))
+
+    def fake_finish(*args, **kwargs):
+        calls.append(("finish", kwargs["output"].shape))
+
+    monkeypatch.setattr(flashmla_mod, "triton_sparse_mla_query_chunk_size", lambda: 2)
+    monkeypatch.setattr(
+        flashmla_mod.envs,
+        "VLLM_DEEPSEEK_V4_INDEXED_D512_FUSED_SINK_PREFILL",
+        False,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        flashmla_mod,
+        "triton_sparse_mla_prefill_topk_chunk_size",
+        lambda **_: 640,
+    )
+    monkeypatch.setattr(
+        flashmla_mod,
+        "accumulate_indexed_d512_split_sparse_mla_attention",
+        fake_split,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        flashmla_mod,
+        "accumulate_indexed_d512_split_sparse_mla_attention_with_sink",
+        fake_fused,
+    )
+    monkeypatch.setattr(
+        flashmla_mod,
+        "finish_sparse_mla_attention_with_sink",
+        fake_finish,
+    )
+
+    DeepseekV4FlashMLAAttention._forward_sparse_mla_prefill_triton(
+        layer=layer,
+        q=q,
+        kv=kv,
+        combined_indices=combined_indices,
+        combined_lens=combined_lens,
+        output=output,
+        state_buffers=(
+            max_score_buffer,
+            denom_buffer,
+            output_buffer,
+            scores,
+        ),
+    )
+
+    assert calls == [
+        ("split", torch.Size([2, 2, 512])),
+        ("finish", torch.Size([2, 2, 512])),
+        ("split", torch.Size([2, 2, 512])),
+        ("finish", torch.Size([2, 2, 512])),
+    ]
